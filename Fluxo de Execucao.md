@@ -8,7 +8,7 @@
 ## Compilação
 1. Clone o repositório:
 ```bash
-git clone https://github.com/moespereira/batalha-naval.git
+git clone https://github.com/moespereira/battleship_project.git
 cd batalha-naval
 ```
 2. Terminal Linux:
