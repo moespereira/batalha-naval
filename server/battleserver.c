@@ -398,7 +398,8 @@ int main() {
     }
 
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_addr.s_addr = INADDR_ANY; //Conexões internas (Terminal)
+    //address.sin_addr.s_addr = htonl(INADDR_ANY); //Conexões via rede
     address.sin_port = htons(PORT);
 
     // Bind
