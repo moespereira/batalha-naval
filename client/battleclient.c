@@ -73,7 +73,11 @@ void exibir_tabuleiros() {
         for (int j = 0; j < TAMANHO_GRADE; j++) {
             char c = campo_adversario[i][j];
             // Não revela navios não descobertos
-            printf("%c ", (c >= '1' && c <= '9') ? '~' : c);
+            if (c == '~' || c == 'M' || c == 'X') {
+                printf("%c ", c);
+            } else {
+                printf("~ ");
+            }
         }
         printf("\n");
     }
@@ -172,7 +176,7 @@ int main(int argc, char *argv[]) {
         }
         
         // Verifica quantidade máxima local
-        if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2) {
+        if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2)) {
             printf("ERRO: Você já posicionou 2 fragatas.\n");
             continue;
         } else if (strcmp(tipo, "SUBMARINO") == 0 && submarinos >= 1) {
@@ -211,11 +215,6 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Atualiza contadores locais
-        if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
-        else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
-        else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
-
         // Envia o comando para o servidor
         enviar_comando(sock);
         receber_resposta(sock);
@@ -230,6 +229,11 @@ int main(int argc, char *argv[]) {
                 meu_campo[xi][yi] = navio_id;
             }
             navios_posicionados++;
+            
+            // Atualiza contadores locais
+            if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
+            else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
+            else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
         }
     }
 
@@ -317,6 +321,9 @@ int main(int argc, char *argv[]) {
         }
         else if (strstr(resposta_servidor, "ERRO:") != NULL) {
             printf("ERRO: %s\n", resposta_servidor);
+        }
+        else if (strcmp(resposta_servidor, "AGUARDE") == 0) {
+            printf("Aguarde seu turno...\n");
         }
         else {
             printf("Servidor: %s\n", resposta_servidor);
