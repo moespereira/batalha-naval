@@ -16,14 +16,28 @@
 #define TAMANHO_GRADE 8
 #define LOG_FILE "battleship.log"
 
-char comando[MAX_MSG];
-int socket_jogador[MAX_JOGADORES];
-int jogador_da_vez = 0;
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-Player player[MAX_JOGADORES];
-int jogadores_conectados = 0;
-int players_ready = 0;
-int fim_do_jogo = 0;
+typedef enum {
+    AGUARDANDO_CONEXAO,
+    POSICIONANDO_NAVIOS,
+    AGUARDANDO_READY,
+    EM_JOGO,
+    JOGO_TERMINADO
+} GameState;
+
+// Estrutura de controle do jogo
+typedef struct {
+    Player player[MAX_JOGADORES];
+    int socket_jogador[MAX_JOGADORES];
+    int jogador_da_vez;
+    int jogadores_prontos;
+    int navios_restantes[MAX_JOGADORES];
+    GameState estado;
+    pthread_mutex_t lock;
+    pthread_cond_t turno_cond;
+    int fim_do_jogo;
+} GameController;
+
+GameController controller;
 
 void registrar_log(const char* mensagem) {
     FILE *log_file = fopen(LOG_FILE, "a");
@@ -52,18 +66,17 @@ int obter_tamanho_navio_str(const char* tipo) {
 }
 
 void imprimir_campo(int indice) {
-    printf("\nCampo do jogador %d - %s:\n", indice, player[indice].nome);
+    printf("\nCampo do jogador %d - %s:\n", indice, controller.player[indice].nome);
     printf("  0 1 2 3 4 5 6 7\n");
     for (int i = 0; i < TAMANHO_GRADE; i++) {
         printf("%d ", i);
         for (int j = 0; j < TAMANHO_GRADE; j++) {
-            printf("%c ", player[indice].campo[i][j]);
+            printf("%c ", controller.player[indice].campo[i][j]);
         }
         printf("\n");
     }
 }
 
-// Função auxiliar para verificar contagem de navios
 static int navios_completos(int fragatas, int submarinos, int destroyers) {
     return (fragatas == 2 && submarinos == 1 && destroyers == 1);
 }
@@ -77,7 +90,7 @@ int posicionar_navios(int sock, int indice_jogador) {
     // Inicializa o campo
     for (int i = 0; i < TAMANHO_GRADE; i++) {
         for (int j = 0; j < TAMANHO_GRADE; j++) {
-            player[indice_jogador].campo[i][j] = '~';
+            controller.player[indice_jogador].campo[i][j] = '~';
         }
     }
 
@@ -126,7 +139,7 @@ int posicionar_navios(int sock, int indice_jogador) {
             char log_msg[100];
             snprintf(log_msg, sizeof(log_msg), 
                      "POS_INVALIDO: %s x=%d y=%d dir=%c tam=%d",
-                     player[indice_jogador].nome, x, y, direcao, tamanho);
+                     controller.player[indice_jogador].nome, x, y, direcao, tamanho);
             printf("%s\n", log_msg);
             registrar_log(log_msg);
             enviar_comando(sock, "ERRO: Fora dos limites do campo.\n");
@@ -144,7 +157,7 @@ int posicionar_navios(int sock, int indice_jogador) {
                 break;
             }
             
-            if (player[indice_jogador].campo[xi][yi] != '~') {
+            if (controller.player[indice_jogador].campo[xi][yi] != '~') {
                 sobreposto = 1;
                 break;
             }
@@ -165,7 +178,7 @@ int posicionar_navios(int sock, int indice_jogador) {
         for (int i = 0; i < tamanho; i++) {
             int xi = x + (direcao == 'V' ? i : 0);
             int yi = y + (direcao == 'H' ? i : 0);
-            player[indice_jogador].campo[xi][yi] = navio_id;
+            controller.player[indice_jogador].campo[xi][yi] = navio_id;
         }
         
         navios_posicionados++;
@@ -173,7 +186,7 @@ int posicionar_navios(int sock, int indice_jogador) {
         enviar_comando(sock, resposta);
     }
 
-    player[indice_jogador].navios_restantes = 4; // 4 navios no total
+    controller.navios_restantes[indice_jogador] = 4;
     enviar_comando(sock, "OK: Todos os navios posicionados!\n");
     imprimir_campo(indice_jogador);
     return 0;
@@ -181,8 +194,8 @@ int posicionar_navios(int sock, int indice_jogador) {
 
 void broadcast(const char* msg) {
     for (int i = 0; i < MAX_JOGADORES; i++) {
-        if (socket_jogador[i] > 0) {
-            enviar_comando(socket_jogador[i], msg);
+        if (controller.socket_jogador[i] > 0) {
+            enviar_comando(controller.socket_jogador[i], msg);
         }
     }
 }
@@ -196,30 +209,30 @@ void processar_ataque(int player_index, int x, int y) {
         char log_msg[100];
         snprintf(log_msg, sizeof(log_msg),
                  "ATAQUE_INVALIDO: %s atacou (%d,%d)",
-                 player[player_index].nome, x, y);
+                 controller.player[player_index].nome, x, y);
         registrar_log(log_msg);
         snprintf(resultado, sizeof(resultado), "ERRO: Coordenadas inválidas");
-        enviar_comando(socket_jogador[player_index], resultado);
+        enviar_comando(controller.socket_jogador[player_index], resultado);
         return;
     }
 
-    char celula = player[alvo_index].campo[x][y];
+    char celula = controller.player[alvo_index].campo[x][y];
     
     if (celula == '~') {
-        player[alvo_index].campo[x][y] = 'M';
+        controller.player[alvo_index].campo[x][y] = 'M';
         snprintf(resultado, sizeof(resultado), "MISS");
         snprintf(notificacao, sizeof(notificacao), "ATACANTE %d %d MISS", x, y);
     } else if (celula == 'M' || celula == 'X') {
         snprintf(resultado, sizeof(resultado), "ERRO: Posição já atacada");
     } else if (isdigit(celula)) {
         char navio_id = celula;
-        player[alvo_index].campo[x][y] = 'X';
+        controller.player[alvo_index].campo[x][y] = 'X';
         
         // Verificar se navio foi afundado
         int afundado = 1;
         for (int i = 0; i < TAMANHO_GRADE && afundado; i++) {
             for (int j = 0; j < TAMANHO_GRADE; j++) {
-                if (player[alvo_index].campo[i][j] == navio_id) {
+                if (controller.player[alvo_index].campo[i][j] == navio_id) {
                     afundado = 0;
                     break;
                 }
@@ -227,7 +240,7 @@ void processar_ataque(int player_index, int x, int y) {
         }
         
         if (afundado) {
-            player[alvo_index].navios_restantes--;
+            controller.navios_restantes[alvo_index]--;
             snprintf(resultado, sizeof(resultado), "SUNK %c", navio_id);
             snprintf(notificacao, sizeof(notificacao), "ATACANTE %d %d SUNK %c", x, y, navio_id);
         } else {
@@ -237,8 +250,8 @@ void processar_ataque(int player_index, int x, int y) {
     }
 
     // Enviar resultados
-    enviar_comando(socket_jogador[player_index], resultado);
-    enviar_comando(socket_jogador[alvo_index], notificacao);
+    enviar_comando(controller.socket_jogador[player_index], resultado);
+    enviar_comando(controller.socket_jogador[alvo_index], notificacao);
 }
 
 void aguardar_ready(int sock) {
@@ -249,8 +262,11 @@ void aguardar_ready(int sock) {
     buffer[bytes] = '\0';
     
     if (strcmp(buffer, "READY") == 0) {
-        players_ready++;
-        if (players_ready < MAX_JOGADORES) {
+        pthread_mutex_lock(&controller.lock);
+        controller.jogadores_prontos++;
+        pthread_mutex_unlock(&controller.lock);
+        
+        if (controller.jogadores_prontos < MAX_JOGADORES) {
             enviar_comando(sock, "AGUARDANDO ADVERSÁRIO");
         }
     }
@@ -264,140 +280,122 @@ void receber_join(int sock) {
     buffer[bytes] = '\0';
     
     if (strncmp(buffer, "JOIN", 4) == 0) {
-        pthread_mutex_lock(&lock);
-        int indice = jogadores_conectados;
-        socket_jogador[indice] = sock;
-        sscanf(buffer + 5, "%49s", player[indice].nome);
-        printf("Jogador conectado: %s\n", player[indice].nome);
-        jogadores_conectados++;
-        pthread_mutex_unlock(&lock);
+        pthread_mutex_lock(&controller.lock);
+        int indice = controller.estado == AGUARDANDO_CONEXAO ? 0 : 1;
+        controller.socket_jogador[indice] = sock;
+        sscanf(buffer + 5, "%49s", controller.player[indice].nome);
+        printf("Jogador conectado: %s\n", controller.player[indice].nome);
+        
+        if (indice == 1) {
+            controller.estado = POSICIONANDO_NAVIOS;
+        }
+        pthread_mutex_unlock(&controller.lock);
     }
+}
+
+void* game_thread(void* arg) {
+    printf("Iniciando controle do jogo...\n");
+    
+    // Notificar início do jogo
+    broadcast("JOGO INICIADO");
+    for (int i = 0; i < MAX_JOGADORES; i++) {
+        char msg[50];
+        snprintf(msg, sizeof(msg), "VOCE_E_JOGADOR %d", i + 1);
+        enviar_comando(controller.socket_jogador[i], msg);
+    }
+    
+    // Fase de posicionamento
+    for (int i = 0; i < MAX_JOGADORES; i++) {
+        if (posicionar_navios(controller.socket_jogador[i], i) < 0) {
+            fprintf(stderr, "Erro no posicionamento de navios do jogador %d\n", i);
+            return NULL;
+        }
+    }
+    
+    // Aguardar ambos prontos
+    for (int i = 0; i < MAX_JOGADORES; i++) {
+        enviar_comando(controller.socket_jogador[i], "AGUARDANDO READY");
+        aguardar_ready(controller.socket_jogador[i]);
+    }
+    
+    // Iniciar jogo
+    pthread_mutex_lock(&controller.lock);
+    controller.estado = EM_JOGO;
+    controller.jogador_da_vez = 0;
+    pthread_mutex_unlock(&controller.lock);
+    
+    broadcast("INICIO DO JOGO");
+    enviar_comando(controller.socket_jogador[0], "PLAY");
+    enviar_comando(controller.socket_jogador[1], "AGUARDE");
+    
+    // Loop principal do jogo
+    while (!controller.fim_do_jogo) {
+        int current_player = controller.jogador_da_vez;
+        int sock = controller.socket_jogador[current_player];
+        
+        // Aguardar jogada do jogador atual
+        char buffer[MAX_MSG];
+        ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytes <= 0) {
+            // Cliente desconectado
+            char msg[] = "DESCONECTADO: O adversário saiu";
+            broadcast(msg);
+            controller.fim_do_jogo = 1;
+            break;
+        }
+        
+        buffer[bytes] = '\0';
+        
+        if (strncmp(buffer, CMD_FIRE, 4) == 0) {
+            int x, y;
+            if (sscanf(buffer + 5, "%d %d", &x, &y) == 2) {
+                // Processa ataque
+                processar_ataque(current_player, x, y);
+                
+                // Verifica vitória
+                int alvo = (current_player + 1) % MAX_JOGADORES;
+                if (controller.navios_restantes[alvo] == 0) {
+                    enviar_comando(controller.socket_jogador[current_player], "WIN");
+                    enviar_comando(controller.socket_jogador[alvo], "LOSE");
+                    broadcast("FIM");
+                    controller.fim_do_jogo = 1;
+                } else {
+                    // Passa a vez
+                    pthread_mutex_lock(&controller.lock);
+                    controller.jogador_da_vez = (controller.jogador_da_vez + 1) % MAX_JOGADORES;
+                    pthread_mutex_unlock(&controller.lock);
+                    
+                    enviar_comando(controller.socket_jogador[controller.jogador_da_vez], "PLAY");
+                    enviar_comando(controller.socket_jogador[(controller.jogador_da_vez + 1) % MAX_JOGADORES], "AGUARDE");
+                }
+            }
+        }
+    }
+    
+    return NULL;
 }
 
 void* lidar_com_jogador(void* arg) {
     int sock = *((int*)arg);
     free(arg);
     
-    int player_index = -1;
-    
     receber_join(sock);
     
-    // Identificar o índice do jogador
-    pthread_mutex_lock(&lock);
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        if (socket_jogador[i] == sock) {
-            player_index = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&lock);
-
-    if (player_index == -1) {
-        close(sock);
-        return NULL;
-    }
-
-    if (jogadores_conectados < MAX_JOGADORES) {
-        enviar_comando(sock, "AGUARDE JOGADOR");
-    } else {
-        broadcast("JOGO INICIADO");
-        for (int i = 0; i < MAX_JOGADORES; i++) {
-            char msg[50];
-            snprintf(msg, sizeof(msg), "VOCE_E_JOGADOR %d", i + 1);
-            enviar_comando(socket_jogador[i], msg);
-        }
-    }
-
-    // Aguarda ambos conectados
-    while (jogadores_conectados < MAX_JOGADORES) {
-        sleep(1);
-    }
-
-    // Fase de posicionamento
-    if (posicionar_navios(sock, player_index) < 0) {
-        close(sock);
-        return NULL;
-    }
-
-    // Fase de ready
-    enviar_comando(sock, "AGUARDANDO READY");
-    aguardar_ready(sock);
-
-    // Aguarda ambos prontos
-    while (players_ready < MAX_JOGADORES) {
-        sleep(1);
-    }
-
-    // Inicia jogo
-    broadcast("INICIO DO JOGO");
-    if (player_index == 0) {
-        enviar_comando(sock, "PLAY 1");
-    } else {
-        enviar_comando(sock, "AGUARDE");
-    }
-
-    // Loop principal do jogo
-    fd_set read_fds;
-    struct timeval tv;
-    char buffer[MAX_MSG];
-    
-    while (!fim_do_jogo) {
-        FD_ZERO(&read_fds);
-        FD_SET(sock, &read_fds);
+    // Se ambos jogadores conectados, iniciar thread de jogo
+    pthread_mutex_lock(&controller.lock);
+    if (controller.estado == POSICIONANDO_NAVIOS && 
+        controller.socket_jogador[0] > 0 && 
+        controller.socket_jogador[1] > 0) {
         
-        tv.tv_sec = 30;
-        tv.tv_usec = 0;
-
-        int rv = select(sock + 1, &read_fds, NULL, NULL, &tv);
-        if (rv > 0) {
-            if (FD_ISSET(sock, &read_fds)) {
-                ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-                if (bytes <= 0) {
-                    // Cliente desconectado
-                    char msg[] = "DESCONECTADO: O adversário saiu";
-                    broadcast(msg);
-                    fim_do_jogo = 1;
-                    break;
-                }
-                
-                buffer[bytes] = '\0';
-                
-                if (strncmp(buffer, CMD_FIRE, 4) == 0) {
-                    int x, y;
-                    if (sscanf(buffer + 5, "%d %d", &x, &y) == 2) {
-                        pthread_mutex_lock(&lock);
-                        
-                        // Processa ataque
-                        processar_ataque(player_index, x, y);
-                        
-                        // Verifica vitória
-                        if (player[(player_index + 1) % MAX_JOGADORES].navios_restantes == 0) {
-                            enviar_comando(socket_jogador[player_index], "WIN");
-                            enviar_comando(socket_jogador[(player_index + 1) % MAX_JOGADORES], "LOSE");
-                            broadcast("FIM");
-                            fim_do_jogo = 1;
-                        } else {
-                            // Passa a vez
-                            jogador_da_vez = (jogador_da_vez + 1) % MAX_JOGADORES;
-                            enviar_comando(socket_jogador[jogador_da_vez], "PLAY");
-                            enviar_comando(socket_jogador[(jogador_da_vez + 1) % MAX_JOGADORES], "AGUARDE");
-                        }
-                        
-                        pthread_mutex_unlock(&lock);
-                    }
-                }
-            }
-        } else if (rv == 0) {
-            // Timeout
-            enviar_comando(sock, "ERRO: Tempo excedido");
-            pthread_mutex_lock(&lock);
-            jogador_da_vez = (player_index + 1) % MAX_JOGADORES;
-            enviar_comando(socket_jogador[jogador_da_vez], "PLAY");
-            pthread_mutex_unlock(&lock);
+        pthread_t game_tid;
+        if (pthread_create(&game_tid, NULL, game_thread, NULL) != 0) {
+            perror("Falha ao criar thread de jogo");
+        } else {
+            pthread_detach(game_tid);
         }
     }
-
-    close(sock);
+    pthread_mutex_unlock(&controller.lock);
+    
     return NULL;
 }
 
@@ -407,9 +405,17 @@ int main() {
     int opt = 1;
     int addrlen = sizeof(address);
     
-    // Inicializar sockets
+    // Inicializar controlador
+    memset(&controller, 0, sizeof(controller));
+    controller.estado = AGUARDANDO_CONEXAO;
+    controller.fim_do_jogo = 0;
+    controller.jogador_da_vez = 0;
+    pthread_mutex_init(&controller.lock, NULL);
+    pthread_cond_init(&controller.turno_cond, NULL);
+    
     for (int i = 0; i < MAX_JOGADORES; i++) {
-        socket_jogador[i] = 0;
+        controller.socket_jogador[i] = 0;
+        controller.navios_restantes[i] = 4;
     }
 
     // Criar socket
@@ -443,10 +449,10 @@ int main() {
     printf("Servidor aguardando conexões na porta %d...\n", PORT);
 
     // Aceitar conexões
-    while (jogadores_conectados < MAX_JOGADORES) {
+    while (!controller.fim_do_jogo) {
         if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
             perror("accept");
-            exit(EXIT_FAILURE);
+            continue;
         }
 
         printf("Nova conexão aceita\n");
@@ -458,18 +464,16 @@ int main() {
         
         if (pthread_create(&thread_id, NULL, lidar_com_jogador, (void*)sock_ptr) < 0) {
             perror("pthread_create");
-            exit(EXIT_FAILURE);
+            close(new_socket);
+            free(sock_ptr);
+        } else {
+            pthread_detach(thread_id);
         }
-        
-        pthread_detach(thread_id);
-    }
-
-    // Manter servidor ativo até fim do jogo
-    while (!fim_do_jogo) {
-        sleep(1);
     }
 
     printf("Fim de jogo. Encerrando servidor.\n");
     close(server_fd);
+    pthread_mutex_destroy(&controller.lock);
+    pthread_cond_destroy(&controller.turno_cond);
     return 0;
 }
