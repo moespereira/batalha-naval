@@ -63,6 +63,11 @@ void imprimir_campo(int indice) {
     }
 }
 
+// Função auxiliar para verificar contagem de navios
+static int navios_completos(int fragatas, int submarinos, int destroyers) {
+    return (fragatas == 2 && submarinos == 1 && destroyers == 1);
+}
+
 int posicionar_navios(int sock, int indice_jogador) {
     int fragatas = 0, submarinos = 0, destroyers = 0;
     char buffer[MAX_MSG];
@@ -76,7 +81,7 @@ int posicionar_navios(int sock, int indice_jogador) {
         }
     }
 
-    while (fragatas < 2 || submarinos < 1 || destroyers < 1) {
+    while (!navios_completos(fragatas, submarinos, destroyers)) {
         memset(buffer, 0, sizeof(buffer));
         ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
         if (bytes <= 0) {
@@ -105,10 +110,14 @@ int posicionar_navios(int sock, int indice_jogador) {
         }
 
         // Verifica quantidade máxima
-        if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2) ||
-            (strcmp(tipo, "SUBMARINO") == 0 && submarinos >= 1) ||
-            (strcmp(tipo, "DESTROYER") == 0 && destroyers >= 1)) {
-            enviar_comando(sock, "ERRO: Quantidade máxima desse tipo já posicionada.\n");
+        if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2) {
+            enviar_comando(sock, "ERRO: Quantidade máxima de fragatas já posicionada (2).\n");
+            continue;
+        } else if (strcmp(tipo, "SUBMARINO") == 0 && submarinos >= 1) {
+            enviar_comando(sock, "ERRO: Quantidade máxima de submarinos já posicionada (1).\n");
+            continue;
+        } else if (strcmp(tipo, "DESTROYER") == 0 && destroyers >= 1) {
+            enviar_comando(sock, "ERRO: Quantidade máxima de destroyers já posicionada (1).\n");
             continue;
         }
 
@@ -146,6 +155,11 @@ int posicionar_navios(int sock, int indice_jogador) {
             continue;
         }
 
+        // Atualiza contadores
+        if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
+        else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
+        else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
+
         // Posiciona o navio
         char navio_id = '1' + navios_posicionados;
         for (int i = 0; i < tamanho; i++) {
@@ -153,18 +167,13 @@ int posicionar_navios(int sock, int indice_jogador) {
             int yi = y + (direcao == 'H' ? i : 0);
             player[indice_jogador].campo[xi][yi] = navio_id;
         }
-
-        // Atualiza contadores
-        if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
-        else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
-        else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
         
         navios_posicionados++;
         snprintf(resposta, sizeof(resposta), "OK: %s posicionado em %d,%d\n", tipo, x, y);
         enviar_comando(sock, resposta);
     }
 
-    player[indice_jogador].navios_restantes = 4;
+    player[indice_jogador].navios_restantes = 4; // 4 navios no total
     enviar_comando(sock, "OK: Todos os navios posicionados!\n");
     imprimir_campo(indice_jogador);
     return 0;
@@ -255,10 +264,13 @@ void receber_join(int sock) {
     buffer[bytes] = '\0';
     
     if (strncmp(buffer, "JOIN", 4) == 0) {
+        pthread_mutex_lock(&lock);
+        int indice = jogadores_conectados;
+        socket_jogador[indice] = sock;
+        sscanf(buffer + 5, "%49s", player[indice].nome);
+        printf("Jogador conectado: %s\n", player[indice].nome);
         jogadores_conectados++;
-        socket_jogador[jogadores_conectados - 1] = sock;
-        sscanf(buffer + 5, "%49s", player[jogadores_conectados - 1].nome);
-        printf("Jogador conectado: %s\n", player[jogadores_conectados - 1].nome);
+        pthread_mutex_unlock(&lock);
     }
 }
 
@@ -266,10 +278,24 @@ void* lidar_com_jogador(void* arg) {
     int sock = *((int*)arg);
     free(arg);
     
-    int player_index = jogadores_conectados;
+    int player_index = -1;
     
     receber_join(sock);
-    player_index = jogadores_conectados - 1;
+    
+    // Identificar o índice do jogador
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < MAX_JOGADORES; i++) {
+        if (socket_jogador[i] == sock) {
+            player_index = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&lock);
+
+    if (player_index == -1) {
+        close(sock);
+        return NULL;
+    }
 
     if (jogadores_conectados < MAX_JOGADORES) {
         enviar_comando(sock, "AGUARDE JOGADOR");
@@ -303,6 +329,7 @@ void* lidar_com_jogador(void* arg) {
     }
 
     // Inicia jogo
+    broadcast("INICIO DO JOGO");
     if (player_index == 0) {
         enviar_comando(sock, "PLAY 1");
     } else {
@@ -398,8 +425,7 @@ int main() {
     }
 
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY; //Conexões internas (Terminal)
-    //address.sin_addr.s_addr = htonl(INADDR_ANY); //Conexões via rede
+    address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
     // Bind
