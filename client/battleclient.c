@@ -88,18 +88,23 @@ void inicializar_tabuleiros() {
     }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("socket creation failed");
         return 1;
     }
 
+    char *server_ip = "127.0.0.1";
+    if (argc > 1) {
+        server_ip = argv[1];
+    }
+
     struct sockaddr_in serv_addr;
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
     
-    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
+    if (inet_pton(AF_INET, server_ip, &serv_addr.sin_addr) <= 0) {
         perror("address conversion failed");
         return 1;
     }
@@ -109,7 +114,7 @@ int main() {
         return 1;
     }
 
-    printf("Conectado ao servidor!\n");
+    printf("Conectado ao servidor em %s!\n", server_ip);
     printf("Digite 'JOIN <seu_nome>' para entrar no jogo.\n");
     
     inicializar_tabuleiros();
@@ -133,9 +138,11 @@ int main() {
     printf("Navios: 2x FRAGATA (tam=2), 1x SUBMARINO (tam=1), 1x DESTROYER (tam=3)\n");
     printf("Use: POS TIPO X Y DIRECAO (H/V)\nEx: POS FRAGATA 3 4 H\n\n");
     
-    exibir_tabuleiros();
+    int fragatas = 0, submarinos = 0, destroyers = 0;
+    int navios_posicionados = 0;
     
-    while (1) {
+    while (!(fragatas == 2 && submarinos == 1 && destroyers == 1)) {
+        exibir_tabuleiros();
         ler_comando_cmd(CMD_POS);
         
         // Validação local antes de enviar
@@ -161,6 +168,18 @@ int main() {
         
         if (direcao != 'H' && direcao != 'V') {
             printf("ERRO: Direção inválida. Use H ou V\n");
+            continue;
+        }
+        
+        // Verifica quantidade máxima local
+        if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2) {
+            printf("ERRO: Você já posicionou 2 fragatas.\n");
+            continue;
+        } else if (strcmp(tipo, "SUBMARINO") == 0 && submarinos >= 1) {
+            printf("ERRO: Você já posicionou 1 submarino.\n");
+            continue;
+        } else if (strcmp(tipo, "DESTROYER") == 0 && destroyers >= 1) {
+            printf("ERRO: Você já posicionou 1 destroyer.\n");
             continue;
         }
         
@@ -192,23 +211,26 @@ int main() {
             continue;
         }
 
-        // Atualiza campo localmente
-        char navio_id = '1' + (strstr(resposta_servidor, "OK:") ? 1 : 0); // Aproximação
-        for (int i = 0; i < tamanho; i++) {
-            int xi = x + (direcao == 'V' ? i : 0);
-            int yi = y + (direcao == 'H' ? i : 0);
-            meu_campo[xi][yi] = navio_id;
-        }
-        
+        // Atualiza contadores locais
+        if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
+        else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
+        else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
+
+        // Envia o comando para o servidor
         enviar_comando(sock);
         receber_resposta(sock);
         printf("%s\n", resposta_servidor);
 
-        if (strstr(resposta_servidor, "Todos os navios") != NULL) {
-            break;
+        // Se o servidor confirmou, atualiza o campo local
+        if (strstr(resposta_servidor, "OK:") != NULL) {
+            char navio_id = '1' + navios_posicionados;
+            for (int i = 0; i < tamanho; i++) {
+                int xi = x + (direcao == 'V' ? i : 0);
+                int yi = y + (direcao == 'H' ? i : 0);
+                meu_campo[xi][yi] = navio_id;
+            }
+            navios_posicionados++;
         }
-        
-        exibir_tabuleiros();
     }
 
     // Fase de preparação
@@ -263,12 +285,22 @@ int main() {
         // Resultados de seu próprio ataque
         else if (strcmp(resposta_servidor, "MISS") == 0) {
             printf("Água! Nenhum navio atingido.\n");
+            // Marcar no campo do adversário como MISS
+            int x, y;
+            sscanf(comando + 5, "%d %d", &x, &y);
+            campo_adversario[x][y] = 'M';
         }
         else if (strcmp(resposta_servidor, "HIT") == 0) {
             printf("Acerto! Você atingiu um navio.\n");
+            int x, y;
+            sscanf(comando + 5, "%d %d", &x, &y);
+            campo_adversario[x][y] = 'X';
         }
         else if (strncmp(resposta_servidor, "SUNK", 4) == 0) {
             printf("Afundado! Você destruiu um navio.\n");
+            int x, y;
+            sscanf(comando + 5, "%d %d", &x, &y);
+            campo_adversario[x][y] = 'X';
         }
         // Fim de jogo
         else if (strcmp(resposta_servidor, "WIN") == 0) {
