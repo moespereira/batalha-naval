@@ -15,13 +15,16 @@ cd batalha-naval
 ```bash
 Abra 3 janelas do terminal
 Na janela para o servidor
-    > mkdir -p bin
     > make
-    > ./bin/battleserver
+    > ./server/battleserver
 
 Nas janelas para os clientes (jogadores)
 Em cada janela, use o comando
-    > ./bin/battleclient
+    ># Máquina 1:
+./client/battleclient <IP_DO_SERVIDOR>
+
+    # Máquina 2:
+./client/battleclient <IP_DO_SERVIDOR>
 ```
 
 ### 4. exemplo_execucao
