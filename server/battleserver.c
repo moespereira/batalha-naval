@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <time.h>
+#include <arpa/inet.h>
 #include "../common/protocol.h"
 
 #define MAX_JOGADORES 2
@@ -186,7 +187,7 @@ int posicionar_navios(int sock, int indice_jogador) {
         enviar_comando(sock, resposta);
     }
 
-    controller.navios_restantes[indice_jogador] = 4;
+    controller.navios_restantes[indice_jogador] = 4; // 4 navios no total
     enviar_comando(sock, "OK: Todos os navios posicionados!\n");
     imprimir_campo(indice_jogador);
     return 0;
@@ -281,13 +282,21 @@ void receber_join(int sock) {
     
     if (strncmp(buffer, "JOIN", 4) == 0) {
         pthread_mutex_lock(&controller.lock);
-        int indice = controller.estado == AGUARDANDO_CONEXAO ? 0 : 1;
-        controller.socket_jogador[indice] = sock;
-        sscanf(buffer + 5, "%49s", controller.player[indice].nome);
-        printf("Jogador conectado: %s\n", controller.player[indice].nome);
-        
-        if (indice == 1) {
-            controller.estado = POSICIONANDO_NAVIOS;
+        int indice = -1;
+        for (int i = 0; i < MAX_JOGADORES; i++) {
+            if (controller.socket_jogador[i] == 0) {
+                indice = i;
+                break;
+            }
+        }
+        if (indice != -1) {
+            controller.socket_jogador[indice] = sock;
+            sscanf(buffer + 5, "%49s", controller.player[indice].nome);
+            printf("Jogador conectado: %s\n", controller.player[indice].nome);
+            
+            if (indice == 1) {
+                controller.estado = POSICIONANDO_NAVIOS;
+            }
         }
         pthread_mutex_unlock(&controller.lock);
     }
@@ -349,6 +358,7 @@ void* game_thread(void* arg) {
         if (strncmp(buffer, CMD_FIRE, 4) == 0) {
             int x, y;
             if (sscanf(buffer + 5, "%d %d", &x, &y) == 2) {
+                pthread_mutex_lock(&controller.lock);
                 // Processa ataque
                 processar_ataque(current_player, x, y);
                 
@@ -359,15 +369,17 @@ void* game_thread(void* arg) {
                     enviar_comando(controller.socket_jogador[alvo], "LOSE");
                     broadcast("FIM");
                     controller.fim_do_jogo = 1;
-                } else {
-                    // Passa a vez
-                    pthread_mutex_lock(&controller.lock);
-                    controller.jogador_da_vez = (controller.jogador_da_vez + 1) % MAX_JOGADORES;
                     pthread_mutex_unlock(&controller.lock);
-                    
-                    enviar_comando(controller.socket_jogador[controller.jogador_da_vez], "PLAY");
-                    enviar_comando(controller.socket_jogador[(controller.jogador_da_vez + 1) % MAX_JOGADORES], "AGUARDE");
+                    break;
                 }
+                
+                // Passa a vez
+                controller.jogador_da_vez = (controller.jogador_da_vez + 1) % MAX_JOGADORES;
+                pthread_mutex_unlock(&controller.lock);
+                
+                // Notifica os jogadores sobre a mudança de turno
+                enviar_comando(controller.socket_jogador[controller.jogador_da_vez], "PLAY");
+                enviar_comando(controller.socket_jogador[(controller.jogador_da_vez + 1) % MAX_JOGADORES], "AGUARDE");
             }
         }
     }
@@ -383,10 +395,16 @@ void* lidar_com_jogador(void* arg) {
     
     // Se ambos jogadores conectados, iniciar thread de jogo
     pthread_mutex_lock(&controller.lock);
-    if (controller.estado == POSICIONANDO_NAVIOS && 
-        controller.socket_jogador[0] > 0 && 
-        controller.socket_jogador[1] > 0) {
-        
+    int ambos_conectados = 1;
+    for (int i = 0; i < MAX_JOGADORES; i++) {
+        if (controller.socket_jogador[i] == 0) {
+            ambos_conectados = 0;
+            break;
+        }
+    }
+    
+    if (ambos_conectados && controller.estado == AGUARDANDO_CONEXAO) {
+        controller.estado = POSICIONANDO_NAVIOS;
         pthread_t game_tid;
         if (pthread_create(&game_tid, NULL, game_thread, NULL) != 0) {
             perror("Falha ao criar thread de jogo");
@@ -437,6 +455,8 @@ int main() {
     // Bind
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
+        printf("Erro ao vincular ao endereço %s:%d\n", 
+               inet_ntoa(address.sin_addr), ntohs(address.sin_port));
         exit(EXIT_FAILURE);
     }
 
@@ -455,7 +475,9 @@ int main() {
             continue;
         }
 
-        printf("Nova conexão aceita\n");
+        char client_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &address.sin_addr, client_ip, sizeof(client_ip));
+        printf("Conexão aceita de %s:%d\n", client_ip, ntohs(address.sin_port));
 
         // Criar thread para o jogador
         pthread_t thread_id;
