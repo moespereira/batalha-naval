@@ -43,7 +43,7 @@ void ler_comando_cmd(const char* protocolo) {
 
 void enviar_comando(int sock) {
     if (send(sock, comando, strlen(comando), 0) < 0) {
-        perror("send failed");
+        perror("Erro ao enviar comando");
     }
 }
 
@@ -51,7 +51,11 @@ void receber_resposta(int sock) {
     memset(resposta_servidor, 0, MAX_MSG);
     int bytes = recv(sock, resposta_servidor, MAX_MSG - 1, 0);
     if (bytes <= 0) {
-        strcpy(resposta_servidor, "FIM");
+        if (bytes == 0) {
+            strcpy(resposta_servidor, "FIM: Conexão encerrada pelo servidor");
+        } else {
+            strcpy(resposta_servidor, "ERRO: Falha na conexão com o servidor");
+        }
     } else {
         resposta_servidor[bytes] = '\0';
     }
@@ -93,32 +97,44 @@ void inicializar_tabuleiros() {
 }
 
 int main(int argc, char *argv[]) {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        perror("socket creation failed");
+    if (argc != 2) {
+        printf("Uso: %s <IP_DO_SERVIDOR>\n", argv[0]);
+        printf("Exemplo: %s 192.168.1.100\n", argv[0]);
         return 1;
     }
 
-    char *server_ip = "127.0.0.1";
-    if (argc > 1) {
-        server_ip = argv[1];
+    char *server_ip = argv[1];
+    printf("Conectando ao servidor em %s:%d...\n", server_ip, PORT);
+    
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("Erro ao criar socket");
+        return 1;
     }
 
     struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
     
     if (inet_pton(AF_INET, server_ip, &serv_addr.sin_addr) <= 0) {
-        perror("address conversion failed");
+        printf("Erro: Endereço IP inválido '%s'\n", server_ip);
+        printf("Use um endereço IPv4 válido (ex: 192.168.1.100)\n");
+        close(sock);
         return 1;
     }
 
     if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("connection failed");
+        perror("Erro ao conectar ao servidor");
+        printf("Verifique:\n");
+        printf("1. Se o servidor está rodando\n");
+        printf("2. Se o IP '%s' está correto\n", server_ip);
+        printf("3. Se o firewall permite conexões na porta %d\n", PORT);
+        close(sock);
         return 1;
     }
 
-    printf("Conectado ao servidor em %s!\n", server_ip);
+    printf("Conectado com sucesso ao servidor!\n");
     printf("Digite 'JOIN <seu_nome>' para entrar no jogo.\n");
     
     inicializar_tabuleiros();
