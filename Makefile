@@ -1,23 +1,6 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -pthread
-SRV_DIR = server
-CLI_DIR = client
-COM_DIR = common
-BIN_DIR = bin
-
-all: server client
-
-server: $(SRV_DIR)/battleserver.c $(COM_DIR)/protocol.h
-	$(CC) $(CFLAGS) -o $(BIN_DIR)/battleserver $(SRV_DIR)/battleserver.c
-
-client: $(CLI_DIR)/battleclient.c $(COM_DIR)/protocol.h
-	$(CC) $(CFLAGS) -o $(BIN_DIR)/battleclient $(CLI_DIR)/battleclient.c
+all:
+    gcc server/battleserver.c -o server/battleserver -pthread
+    gcc client/battleclient.c -o client/battleclient
 
 clean:
-	rm -f $(BIN_DIR)/battleserver $(BIN_DIR)/battleclient
-
-run_server:
-	$(BIN_DIR)/battleserver
-
-run_client:
-	$(BIN_DIR)/battleclient
+    rm -f server/battleserver client/battleclient
