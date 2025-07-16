@@ -123,7 +123,7 @@ int posicionar_navios(int sock, int indice_jogador) {
         }
 
         // Verifica quantidade máxima
-        if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2) {
+        if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2)) {
             enviar_comando(sock, "ERRO: Quantidade máxima de fragatas já posicionada (2).\n");
             continue;
         } else if (strcmp(tipo, "SUBMARINO") == 0 && submarinos >= 1) {
