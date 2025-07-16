@@ -1,153 +1,215 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <netinet/in.h>
-#include <pthread.h>
-#include <ctype.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <errno.h>
-#include <time.h>
 #include <arpa/inet.h>
+#include <string.h>
+#include <ctype.h>
 #include "../common/protocol.h"
 
-#define MAX_JOGADORES 2
 #define TAMANHO_GRADE 8
-#define LOG_FILE "battleship.log"
 
-typedef enum {
-    AGUARDANDO_CONEXAO,
-    POSICIONANDO_NAVIOS,
-    AGUARDANDO_READY,
-    EM_JOGO,
-    JOGO_TERMINADO
-} GameState;
+char resposta_servidor[MAX_MSG];
+char comando[MAX_MSG];
+char meu_campo[TAMANHO_GRADE][TAMANHO_GRADE];
+char campo_adversario[TAMANHO_GRADE][TAMANHO_GRADE];
 
-// Estrutura de controle do jogo
-typedef struct {
-    Player player[MAX_JOGADORES];
-    int socket_jogador[MAX_JOGADORES];
-    int jogador_da_vez;
-    int jogadores_prontos;
-    int navios_restantes[MAX_JOGADORES];
-    GameState estado;
-    pthread_mutex_t lock;
-    pthread_cond_t turno_cond;
-    int fim_do_jogo;
-} GameController;
+void limpar_entrada() {
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF);
+}
 
-GameController controller;
-
-void registrar_log(const char* mensagem) {
-    FILE *log_file = fopen(LOG_FILE, "a");
-    if (log_file) {
-        time_t now = time(NULL);
-        struct tm *t = localtime(&now);
-        fprintf(log_file, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
-                t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-                t->tm_hour, t->tm_min, t->tm_sec,
-                mensagem);
-        fclose(log_file);
+void ler_comando_cmd(const char* protocolo) {
+    while (1) {
+        printf("> ");
+        fflush(stdout);
+        
+        if (fgets(comando, MAX_MSG, stdin) == NULL) {
+            continue;
+        }
+        
+        comando[strcspn(comando, "\n")] = '\0';
+        
+        if (strlen(comando) == 0) {
+            continue;
+        }
+        
+        if (strstr(comando, protocolo) != NULL) {
+            break;
+        } else {
+            printf("Comando inválido. Deve começar com '%s'. Tente novamente.\n", protocolo);
+        }
     }
 }
 
-void enviar_comando(int sock, const char* msg) {
-    if (send(sock, msg, strlen(msg), 0) < 0) {
-        perror("send failed");
+void enviar_comando(int sock) {
+    if (send(sock, comando, strlen(comando), 0) < 0) {
+        perror("Erro ao enviar comando");
     }
 }
 
-int obter_tamanho_navio_str(const char* tipo) {
-    if (strcmp(tipo, "SUBMARINO") == 0) return 1;
-    if (strcmp(tipo, "FRAGATA") == 0) return 2;
-    if (strcmp(tipo, "DESTROYER") == 0) return 3;
-    return -1;
+void receber_resposta(int sock) {
+    memset(resposta_servidor, 0, MAX_MSG);
+    int bytes = recv(sock, resposta_servidor, MAX_MSG - 1, 0);
+    if (bytes <= 0) {
+        if (bytes == 0) {
+            strcpy(resposta_servidor, "FIM: Conexão encerrada pelo servidor");
+        } else {
+            strcpy(resposta_servidor, "ERRO: Falha na conexão com o servidor");
+        }
+    } else {
+        resposta_servidor[bytes] = '\0';
+    }
 }
 
-void imprimir_campo(int indice) {
-    printf("\nCampo do jogador %d - %s:\n", indice, controller.player[indice].nome);
-    printf("  0 1 2 3 4 5 6 7\n");
+void exibir_tabuleiros() {
+    printf("\nSEU CAMPO:\n  0 1 2 3 4 5 6 7\n");
     for (int i = 0; i < TAMANHO_GRADE; i++) {
         printf("%d ", i);
         for (int j = 0; j < TAMANHO_GRADE; j++) {
-            printf("%c ", controller.player[indice].campo[i][j]);
+            printf("%c ", meu_campo[i][j]);
+        }
+        printf("\n");
+    }
+    
+    printf("\nCAMPO ADVERSÁRIO:\n  0 1 2 3 4 5 6 7\n");
+    for (int i = 0; i < TAMANHO_GRADE; i++) {
+        printf("%d ", i);
+        for (int j = 0; j < TAMANHO_GRADE; j++) {
+            char c = campo_adversario[i][j];
+            // Não revela navios não descobertos
+            if (c == '~' || c == 'M' || c == 'X') {
+                printf("%c ", c);
+            } else {
+                printf("~ ");
+            }
         }
         printf("\n");
     }
 }
 
-static int navios_completos(int fragatas, int submarinos, int destroyers) {
-    return (fragatas == 2 && submarinos == 1 && destroyers == 1);
-}
-
-int posicionar_navios(int sock, int indice_jogador) {
-    int fragatas = 0, submarinos = 0, destroyers = 0;
-    char buffer[MAX_MSG];
-    char resposta[256];
-    int navios_posicionados = 0;
-
-    // Inicializa o campo
+void inicializar_tabuleiros() {
     for (int i = 0; i < TAMANHO_GRADE; i++) {
         for (int j = 0; j < TAMANHO_GRADE; j++) {
-            controller.player[indice_jogador].campo[i][j] = '~';
+            meu_campo[i][j] = '~';
+            campo_adversario[i][j] = '~';
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Uso: %s <IP_DO_SERVIDOR>\n", argv[0]);
+        printf("Exemplo: %s 192.168.1.100\n", argv[0]);
+        return 1;
+    }
+
+    char *server_ip = argv[1];
+    printf("Conectando ao servidor em %s:%d...\n", server_ip, PORT);
+    
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("Erro ao criar socket");
+        return 1;
+    }
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+    
+    if (inet_pton(AF_INET, server_ip, &serv_addr.sin_addr) <= 0) {
+        printf("Erro: Endereço IP inválido '%s'\n", server_ip);
+        printf("Use um endereço IPv4 válido (ex: 192.168.1.100)\n");
+        close(sock);
+        return 1;
+    }
+
+    if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("Erro ao conectar ao servidor");
+        printf("Verifique:\n");
+        printf("1. Se o servidor está rodando\n");
+        printf("2. Se o IP '%s' está correto\n", server_ip);
+        printf("3. Se o firewall permite conexões na porta %d\n", PORT);
+        close(sock);
+        return 1;
+    }
+
+    printf("Conectado com sucesso ao servidor!\n");
+    printf("Digite 'JOIN <seu_nome>' para entrar no jogo.\n");
+    
+    inicializar_tabuleiros();
+    
+    // Fase de conexão
+    ler_comando_cmd(CMD_JOIN);
+    enviar_comando(sock);
+    
+    // Receber confirmação de conexão
+    while (1) {
+        receber_resposta(sock);
+        printf("%s\n", resposta_servidor);
+        
+        if (strstr(resposta_servidor, CMD_VOCE_E_JOGADOR) != NULL) {
+            break;
         }
     }
 
-    while (!navios_completos(fragatas, submarinos, destroyers)) {
-        memset(buffer, 0, sizeof(buffer));
-        ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-        if (bytes <= 0) {
-            perror("recv failed or client disconnected");
-            return -1;
-        }
-
-        buffer[bytes] = '\0';
-
+    // Fase de posicionamento
+    printf("\n=== FASE DE POSICIONAMENTO ===\n");
+    printf("Navios: 2x FRAGATA (tam=2), 1x SUBMARINO (tam=1), 1x DESTROYER (tam=3)\n");
+    printf("Use: POS TIPO X Y DIRECAO (H/V)\nEx: POS FRAGATA 3 4 H\n\n");
+    
+    int fragatas = 0, submarinos = 0, destroyers = 0;
+    int navios_posicionados = 0;
+    
+    while (!(fragatas == 2 && submarinos == 1 && destroyers == 1)) {
+        exibir_tabuleiros();
+        ler_comando_cmd(CMD_POS);
+        
+        // Validação local antes de enviar
         char tipo[16] = {0}, direcao;
         int x, y;
-
-        if (sscanf(buffer, "POS %15s %d %d %c", tipo, &x, &y, &direcao) != 4) {
-            enviar_comando(sock, "ERRO: Comando inválido. Use: POS TIPO X Y DIRECAO\n");
+        if (sscanf(comando, "POS %15s %d %d %c", tipo, &x, &y, &direcao) != 4) {
+            printf("ERRO: Formato inválido. Use: POS TIPO X Y DIRECAO\n");
             continue;
         }
 
-        // Normaliza para maiúsculas
+        // Normalizar entrada
         for (int i = 0; tipo[i]; i++) tipo[i] = toupper(tipo[i]);
         direcao = toupper(direcao);
-
-        int tamanho = obter_tamanho_navio_str(tipo);
-        if (tamanho == -1 || (direcao != 'H' && direcao != 'V')) {
-            enviar_comando(sock, "ERRO: Tipo ou direção inválida. Use FRAGATA, SUBMARINO, DESTROYER e H/V.\n");
+        
+        int tamanho = 0;
+        if (strcmp(tipo, "FRAGATA") == 0) tamanho = 2;
+        else if (strcmp(tipo, "SUBMARINO") == 0) tamanho = 1;
+        else if (strcmp(tipo, "DESTROYER") == 0) tamanho = 3;
+        else {
+            printf("ERRO: Tipo inválido. Use FRAGATA, SUBMARINO ou DESTROYER\n");
             continue;
         }
-
-        // Verifica quantidade máxima
+        
+        if (direcao != 'H' && direcao != 'V') {
+            printf("ERRO: Direção inválida. Use H ou V\n");
+            continue;
+        }
+        
+        // Verifica quantidade máxima local
         if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2)) {
-            enviar_comando(sock, "ERRO: Quantidade máxima de fragatas já posicionada (2).\n");
+            printf("ERRO: Você já posicionou 2 fragatas.\n");
             continue;
         } else if (strcmp(tipo, "SUBMARINO") == 0 && submarinos >= 1) {
-            enviar_comando(sock, "ERRO: Quantidade máxima de submarinos já posicionada (1).\n");
+            printf("ERRO: Você já posicionou 1 submarino.\n");
             continue;
         } else if (strcmp(tipo, "DESTROYER") == 0 && destroyers >= 1) {
-            enviar_comando(sock, "ERRO: Quantidade máxima de destroyers já posicionada (1).\n");
+            printf("ERRO: Você já posicionou 1 destroyer.\n");
             continue;
         }
-
-        // Valida posição
+        
+        // Validação unificada
         if (!validar_posicao(x, y, direcao, tamanho)) {
-            char log_msg[100];
-            snprintf(log_msg, sizeof(log_msg), 
-                     "POS_INVALIDO: %s x=%d y=%d dir=%c tam=%d",
-                     controller.player[indice_jogador].nome, x, y, direcao, tamanho);
-            printf("%s\n", log_msg);
-            registrar_log(log_msg);
-            enviar_comando(sock, "ERRO: Fora dos limites do campo.\n");
+            printf("ERRO: Posição inválida! Fora dos limites do campo.\n");
             continue;
         }
-
-        // Verifica sobreposição
+        
+        // Verificação local de sobreposição
         int sobreposto = 0;
         for (int i = 0; i < tamanho; i++) {
             int xi = x + (direcao == 'V' ? i : 0);
@@ -158,344 +220,133 @@ int posicionar_navios(int sock, int indice_jogador) {
                 break;
             }
             
-            if (controller.player[indice_jogador].campo[xi][yi] != '~') {
+            if (meu_campo[xi][yi] != '~') {
                 sobreposto = 1;
                 break;
             }
         }
-
+        
         if (sobreposto) {
-            enviar_comando(sock, "ERRO: Sobreposição detectada. Escolha outra posição.\n");
+            printf("ERRO: Posição sobreposta ou inválida!\n");
             continue;
         }
 
-        // Atualiza contadores
-        if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
-        else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
-        else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
+        // Envia o comando para o servidor
+        enviar_comando(sock);
+        receber_resposta(sock);
+        printf("%s\n", resposta_servidor);
 
-        // Posiciona o navio
-        char navio_id = '1' + navios_posicionados;
-        for (int i = 0; i < tamanho; i++) {
-            int xi = x + (direcao == 'V' ? i : 0);
-            int yi = y + (direcao == 'H' ? i : 0);
-            controller.player[indice_jogador].campo[xi][yi] = navio_id;
-        }
-        
-        navios_posicionados++;
-        snprintf(resposta, sizeof(resposta), "OK: %s posicionado em %d,%d\n", tipo, x, y);
-        enviar_comando(sock, resposta);
-    }
-
-    controller.navios_restantes[indice_jogador] = 4; // 4 navios no total
-    enviar_comando(sock, "OK: Todos os navios posicionados!\n");
-    imprimir_campo(indice_jogador);
-    return 0;
-}
-
-void broadcast(const char* msg) {
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        if (controller.socket_jogador[i] > 0) {
-            enviar_comando(controller.socket_jogador[i], msg);
-        }
-    }
-}
-
-void processar_ataque(int player_index, int x, int y) {
-    int alvo_index = (player_index + 1) % MAX_JOGADORES;
-    char resultado[MAX_MSG] = {0};
-    char notificacao[MAX_MSG] = {0};
-
-    if (x < 0 || x >= TAMANHO_GRADE || y < 0 || y >= TAMANHO_GRADE) {
-        char log_msg[100];
-        snprintf(log_msg, sizeof(log_msg),
-                 "ATAQUE_INVALIDO: %s atacou (%d,%d)",
-                 controller.player[player_index].nome, x, y);
-        registrar_log(log_msg);
-        snprintf(resultado, sizeof(resultado), "ERRO: Coordenadas inválidas");
-        enviar_comando(controller.socket_jogador[player_index], resultado);
-        return;
-    }
-
-    char celula = controller.player[alvo_index].campo[x][y];
-    
-    if (celula == '~') {
-        controller.player[alvo_index].campo[x][y] = 'M';
-        snprintf(resultado, sizeof(resultado), "MISS");
-        snprintf(notificacao, sizeof(notificacao), "ATACANTE %d %d MISS", x, y);
-    } else if (celula == 'M' || celula == 'X') {
-        snprintf(resultado, sizeof(resultado), "ERRO: Posição já atacada");
-    } else if (isdigit(celula)) {
-        char navio_id = celula;
-        controller.player[alvo_index].campo[x][y] = 'X';
-        
-        // Verificar se navio foi afundado
-        int afundado = 1;
-        for (int i = 0; i < TAMANHO_GRADE && afundado; i++) {
-            for (int j = 0; j < TAMANHO_GRADE; j++) {
-                if (controller.player[alvo_index].campo[i][j] == navio_id) {
-                    afundado = 0;
-                    break;
-                }
+        // Se o servidor confirmou, atualiza o campo local
+        if (strstr(resposta_servidor, "OK:") != NULL) {
+            char navio_id = '1' + navios_posicionados;
+            for (int i = 0; i < tamanho; i++) {
+                int xi = x + (direcao == 'V' ? i : 0);
+                int yi = y + (direcao == 'H' ? i : 0);
+                meu_campo[xi][yi] = navio_id;
             }
-        }
-        
-        if (afundado) {
-            controller.navios_restantes[alvo_index]--;
-            snprintf(resultado, sizeof(resultado), "SUNK %c", navio_id);
-            snprintf(notificacao, sizeof(notificacao), "ATACANTE %d %d SUNK %c", x, y, navio_id);
-        } else {
-            snprintf(resultado, sizeof(resultado), "HIT");
-            snprintf(notificacao, sizeof(notificacao), "ATACANTE %d %d HIT", x, y);
-        }
-    }
-
-    // Enviar resultados
-    enviar_comando(controller.socket_jogador[player_index], resultado);
-    enviar_comando(controller.socket_jogador[alvo_index], notificacao);
-}
-
-void aguardar_ready(int sock) {
-    char buffer[MAX_MSG];
-    ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-    if (bytes <= 0) return;
-    
-    buffer[bytes] = '\0';
-    
-    if (strcmp(buffer, "READY") == 0) {
-        pthread_mutex_lock(&controller.lock);
-        controller.jogadores_prontos++;
-        pthread_mutex_unlock(&controller.lock);
-        
-        if (controller.jogadores_prontos < MAX_JOGADORES) {
-            enviar_comando(sock, "AGUARDANDO ADVERSÁRIO");
-        }
-    }
-}
-
-void receber_join(int sock) {
-    char buffer[MAX_MSG];
-    ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-    if (bytes <= 0) return;
-    
-    buffer[bytes] = '\0';
-    
-    if (strncmp(buffer, "JOIN", 4) == 0) {
-        pthread_mutex_lock(&controller.lock);
-        int indice = -1;
-        for (int i = 0; i < MAX_JOGADORES; i++) {
-            if (controller.socket_jogador[i] == 0) {
-                indice = i;
-                break;
-            }
-        }
-        if (indice != -1) {
-            controller.socket_jogador[indice] = sock;
-            sscanf(buffer + 5, "%49s", controller.player[indice].nome);
-            printf("Jogador conectado: %s\n", controller.player[indice].nome);
+            navios_posicionados++;
             
-            if (indice == 1) {
-                controller.estado = POSICIONANDO_NAVIOS;
-            }
+            // Atualiza contadores locais
+            if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
+            else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
+            else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
         }
-        pthread_mutex_unlock(&controller.lock);
     }
-}
 
-void* game_thread(void* arg) {
-    printf("Iniciando controle do jogo...\n");
-    
-    // Notificar início do jogo
-    broadcast("JOGO INICIADO");
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        char msg[50];
-        snprintf(msg, sizeof(msg), "VOCE_E_JOGADOR %d", i + 1);
-        enviar_comando(controller.socket_jogador[i], msg);
-    }
-    
-    // Fase de posicionamento
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        if (posicionar_navios(controller.socket_jogador[i], i) < 0) {
-            fprintf(stderr, "Erro no posicionamento de navios do jogador %d\n", i);
-            return NULL;
-        }
-    }
-    
-    // Aguardar ambos prontos
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        enviar_comando(controller.socket_jogador[i], "AGUARDANDO READY");
-        aguardar_ready(controller.socket_jogador[i]);
-    }
-    
-    // Iniciar jogo
-    pthread_mutex_lock(&controller.lock);
-    controller.estado = EM_JOGO;
-    controller.jogador_da_vez = 0;
-    pthread_mutex_unlock(&controller.lock);
-    
-    broadcast("INICIO DO JOGO");
-    enviar_comando(controller.socket_jogador[0], "PLAY");
-    enviar_comando(controller.socket_jogador[1], "AGUARDE");
-    
+    // Fase de preparação
+    printf("\nDigite 'READY' quando estiver pronto\n");
+    ler_comando_cmd(CMD_READY);
+    enviar_comando(sock);
+    receber_resposta(sock);
+    printf("%s\n", resposta_servidor);
+
     // Loop principal do jogo
-    while (!controller.fim_do_jogo) {
-        int current_player = controller.jogador_da_vez;
-        int sock = controller.socket_jogador[current_player];
+    printf("\n=== FASE DE ATAQUE ===\n");
+    
+    while (1) {
+        receber_resposta(sock);
         
-        // Aguardar jogada do jogador atual
-        char buffer[MAX_MSG];
-        ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-        if (bytes <= 0) {
-            // Cliente desconectado
-            char msg[] = "DESCONECTADO: O adversário saiu";
-            broadcast(msg);
-            controller.fim_do_jogo = 1;
-            break;
-        }
-        
-        buffer[bytes] = '\0';
-        
-        if (strncmp(buffer, CMD_FIRE, 4) == 0) {
+        // Comando PLAY indica que é sua vez
+        if (strstr(resposta_servidor, CMD_PLAY) != NULL) {
+            exibir_tabuleiros();
+            printf("\nSUA VEZ! Digite 'FIRE X Y' (ex: FIRE 3 4)\n");
+            ler_comando_cmd(CMD_FIRE);
+            
+            // Validar coordenadas de ataque localmente
             int x, y;
-            if (sscanf(buffer + 5, "%d %d", &x, &y) == 2) {
-                pthread_mutex_lock(&controller.lock);
-                // Processa ataque
-                processar_ataque(current_player, x, y);
-                
-                // Verifica vitória
-                int alvo = (current_player + 1) % MAX_JOGADORES;
-                if (controller.navios_restantes[alvo] == 0) {
-                    enviar_comando(controller.socket_jogador[current_player], "WIN");
-                    enviar_comando(controller.socket_jogador[alvo], "LOSE");
-                    broadcast("FIM");
-                    controller.fim_do_jogo = 1;
-                    pthread_mutex_unlock(&controller.lock);
-                    break;
-                }
-                
-                // Passa a vez
-                controller.jogador_da_vez = (controller.jogador_da_vez + 1) % MAX_JOGADORES;
-                pthread_mutex_unlock(&controller.lock);
-                
-                // Notifica os jogadores sobre a mudança de turno
-                enviar_comando(controller.socket_jogador[controller.jogador_da_vez], "PLAY");
-                enviar_comando(controller.socket_jogador[(controller.jogador_da_vez + 1) % MAX_JOGADORES], "AGUARDE");
+            if (sscanf(comando, "FIRE %d %d", &x, &y) != 2) {
+                printf("ERRO: Formato inválido. Use FIRE X Y\n");
+                continue;
             }
+            if (x < 0 || x >= TAMANHO_GRADE || y < 0 || y >= TAMANHO_GRADE) {
+                printf("ERRO: Coordenadas fora do tabuleiro (0 a %d)\n", TAMANHO_GRADE-1);
+                continue;
+            }
+            
+            enviar_comando(sock);
         }
-    }
-    
-    return NULL;
-}
-
-void* lidar_com_jogador(void* arg) {
-    int sock = *((int*)arg);
-    free(arg);
-    
-    receber_join(sock);
-    
-    // Se ambos jogadores conectados, iniciar thread de jogo
-    pthread_mutex_lock(&controller.lock);
-    int ambos_conectados = 1;
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        if (controller.socket_jogador[i] == 0) {
-            ambos_conectados = 0;
+        // Comando ATACANTE indica resultado do adversário
+        else if (strstr(resposta_servidor, CMD_ATACANTE) != NULL) {
+            int x, y;
+            char resultado[10];
+            sscanf(resposta_servidor + 9, "%d %d %s", &x, &y, resultado);
+            
+            if (strcmp(resultado, "MISS") == 0) {
+                campo_adversario[x][y] = 'M';
+            } else if (strcmp(resultado, "HIT") == 0) {
+                campo_adversario[x][y] = 'X';
+            } else if (strncmp(resultado, "SUNK", 4) == 0) {
+                campo_adversario[x][y] = 'X';
+            }
+            
+            exibir_tabuleiros();
+            printf("Adversário atacou: %s\n", resposta_servidor);
+        }
+        // Resultados de seu próprio ataque
+        else if (strcmp(resposta_servidor, "MISS") == 0) {
+            printf("Água! Nenhum navio atingido.\n");
+            // Marcar no campo do adversário como MISS
+            int x, y;
+            sscanf(comando + 5, "%d %d", &x, &y);
+            campo_adversario[x][y] = 'M';
+        }
+        else if (strcmp(resposta_servidor, "HIT") == 0) {
+            printf("Acerto! Você atingiu um navio.\n");
+            int x, y;
+            sscanf(comando + 5, "%d %d", &x, &y);
+            campo_adversario[x][y] = 'X';
+        }
+        else if (strncmp(resposta_servidor, "SUNK", 4) == 0) {
+            printf("Afundado! Você destruiu um navio.\n");
+            int x, y;
+            sscanf(comando + 5, "%d %d", &x, &y);
+            campo_adversario[x][y] = 'X';
+        }
+        // Fim de jogo
+        else if (strcmp(resposta_servidor, "WIN") == 0) {
+            printf("\nPARABÉNS! VOCÊ VENCEU!\n");
             break;
         }
-    }
-    
-    if (ambos_conectados && controller.estado == AGUARDANDO_CONEXAO) {
-        controller.estado = POSICIONANDO_NAVIOS;
-        pthread_t game_tid;
-        if (pthread_create(&game_tid, NULL, game_thread, NULL) != 0) {
-            perror("Falha ao criar thread de jogo");
-        } else {
-            pthread_detach(game_tid);
+        else if (strcmp(resposta_servidor, "LOSE") == 0) {
+            printf("\nVOCÊ PERDEU! TENTE NOVAMENTE.\n");
+            break;
         }
-    }
-    pthread_mutex_unlock(&controller.lock);
-    
-    return NULL;
-}
-
-int main() {
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int opt = 1;
-    int addrlen = sizeof(address);
-    
-    // Inicializar controlador
-    memset(&controller, 0, sizeof(controller));
-    controller.estado = AGUARDANDO_CONEXAO;
-    controller.fim_do_jogo = 0;
-    controller.jogador_da_vez = 0;
-    pthread_mutex_init(&controller.lock, NULL);
-    pthread_cond_init(&controller.turno_cond, NULL);
-    
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        controller.socket_jogador[i] = 0;
-        controller.navios_restantes[i] = 4;
-    }
-
-    // Criar socket
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Configurar socket
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
-    }
-
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    // Bind
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("bind failed");
-        printf("Erro ao vincular ao endereço %s:%d\n", 
-               inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-        exit(EXIT_FAILURE);
-    }
-
-    // Listen
-    if (listen(server_fd, 3) < 0) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Servidor aguardando conexões na porta %d...\n", PORT);
-
-    // Aceitar conexões
-    while (!controller.fim_do_jogo) {
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("accept");
-            continue;
+        else if (strcmp(resposta_servidor, "FIM") == 0) {
+            printf("\nFim de jogo!\n");
+            break;
         }
-
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &address.sin_addr, client_ip, sizeof(client_ip));
-        printf("Conexão aceita de %s:%d\n", client_ip, ntohs(address.sin_port));
-
-        // Criar thread para o jogador
-        pthread_t thread_id;
-        int *sock_ptr = malloc(sizeof(int));
-        *sock_ptr = new_socket;
-        
-        if (pthread_create(&thread_id, NULL, lidar_com_jogador, (void*)sock_ptr) < 0) {
-            perror("pthread_create");
-            close(new_socket);
-            free(sock_ptr);
-        } else {
-            pthread_detach(thread_id);
+        else if (strstr(resposta_servidor, "ERRO:") != NULL) {
+            printf("ERRO: %s\n", resposta_servidor);
+        }
+        else if (strcmp(resposta_servidor, "AGUARDE") == 0) {
+            printf("Aguarde seu turno...\n");
+        }
+        else {
+            printf("Servidor: %s\n", resposta_servidor);
         }
     }
 
-    printf("Fim de jogo. Encerrando servidor.\n");
-    close(server_fd);
-    pthread_mutex_destroy(&controller.lock);
-    pthread_cond_destroy(&controller.turno_cond);
+    close(sock);
+    printf("Conexão encerrada.\n");
     return 0;
 }
