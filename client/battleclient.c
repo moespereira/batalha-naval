@@ -76,7 +76,6 @@ void exibir_tabuleiros() {
         printf("%d ", i);
         for (int j = 0; j < TAMANHO_GRADE; j++) {
             char c = campo_adversario[i][j];
-            // Não revela navios não descobertos
             if (c == '~' || c == 'M' || c == 'X') {
                 printf("%c ", c);
             } else {
@@ -175,7 +174,6 @@ int main(int argc, char *argv[]) {
         exibir_tabuleiros();
         ler_comando_cmd(CMD_POS);
         
-        // Validação local antes de enviar
         char tipo[16] = {0}, direcao;
         int x, y;
         if (sscanf(comando, "POS %15s %d %d %c", tipo, &x, &y, &direcao) != 4) {
@@ -183,7 +181,6 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Normalizar entrada
         for (int i = 0; tipo[i]; i++) tipo[i] = toupper(tipo[i]);
         direcao = toupper(direcao);
         
@@ -201,7 +198,6 @@ int main(int argc, char *argv[]) {
             continue;
         }
         
-        // Verifica quantidade máxima local
         if ((strcmp(tipo, "FRAGATA") == 0 && fragatas >= 2)) {
             printf("ERRO: Você já posicionou 2 fragatas.\n");
             continue;
@@ -213,13 +209,11 @@ int main(int argc, char *argv[]) {
             continue;
         }
         
-        // Validação unificada
         if (!validar_posicao(x, y, direcao, tamanho)) {
             printf("ERRO: Posição inválida! Fora dos limites do campo.\n");
             continue;
         }
         
-        // Verificação local de sobreposição
         int sobreposto = 0;
         for (int i = 0; i < tamanho; i++) {
             int xi = x + (direcao == 'V' ? i : 0);
@@ -241,12 +235,10 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Envia o comando para o servidor
         enviar_comando(sock);
         receber_resposta(sock);
         printf("%s\n", resposta_servidor);
 
-        // Se o servidor confirmou, atualiza o campo local
         if (strstr(resposta_servidor, "OK:") != NULL) {
             char navio_id = '1' + navios_posicionados;
             for (int i = 0; i < tamanho; i++) {
@@ -256,7 +248,6 @@ int main(int argc, char *argv[]) {
             }
             navios_posicionados++;
             
-            // Atualiza contadores locais
             if (strcmp(tipo, "FRAGATA") == 0) fragatas++;
             else if (strcmp(tipo, "SUBMARINO") == 0) submarinos++;
             else if (strcmp(tipo, "DESTROYER") == 0) destroyers++;
@@ -276,13 +267,11 @@ int main(int argc, char *argv[]) {
     while (1) {
         receber_resposta(sock);
         
-        // Comando PLAY indica que é sua vez
         if (strstr(resposta_servidor, CMD_PLAY) != NULL) {
             exibir_tabuleiros();
             printf("\nSUA VEZ! Digite 'FIRE X Y' (ex: FIRE 3 4)\n");
             ler_comando_cmd(CMD_FIRE);
             
-            // Validar coordenadas de ataque localmente
             int x, y;
             if (sscanf(comando, "FIRE %d %d", &x, &y) != 2) {
                 printf("ERRO: Formato inválido. Use FIRE X Y\n");
@@ -295,27 +284,27 @@ int main(int argc, char *argv[]) {
             
             enviar_comando(sock);
         }
-        // Comando ATACANTE indica resultado do adversário
+        // Atualiza campo próprio quando atacado
         else if (strstr(resposta_servidor, CMD_ATACANTE) != NULL) {
             int x, y;
             char resultado[10];
             sscanf(resposta_servidor + 9, "%d %d %s", &x, &y, resultado);
             
+            // CORREÇÃO: Atualiza o campo próprio (meu_campo)
             if (strcmp(resultado, "MISS") == 0) {
-                campo_adversario[x][y] = 'M';
+                meu_campo[x][y] = 'M';
             } else if (strcmp(resultado, "HIT") == 0) {
-                campo_adversario[x][y] = 'X';
+                meu_campo[x][y] = 'X';
             } else if (strncmp(resultado, "SUNK", 4) == 0) {
-                campo_adversario[x][y] = 'X';
+                meu_campo[x][y] = 'X';
             }
             
             exibir_tabuleiros();
             printf("Adversário atacou: %s\n", resposta_servidor);
         }
-        // Resultados de seu próprio ataque
+        // Atualiza campo adversário quando ataca
         else if (strcmp(resposta_servidor, "MISS") == 0) {
             printf("Água! Nenhum navio atingido.\n");
-            // Marcar no campo do adversário como MISS
             int x, y;
             sscanf(comando + 5, "%d %d", &x, &y);
             campo_adversario[x][y] = 'M';
@@ -332,7 +321,6 @@ int main(int argc, char *argv[]) {
             sscanf(comando + 5, "%d %d", &x, &y);
             campo_adversario[x][y] = 'X';
         }
-        // Fim de jogo
         else if (strcmp(resposta_servidor, "WIN") == 0) {
             printf("\nPARABÉNS! VOCÊ VENCEU!\n");
             break;
