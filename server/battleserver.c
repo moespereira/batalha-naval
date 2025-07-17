@@ -16,6 +16,7 @@
 #define MAX_JOGADORES 2
 #define TAMANHO_GRADE 8
 #define LOG_FILE "battleship.log"
+#define LOG_MSG_SIZE 256  // Tamanho fixo para mensagens de log
 
 typedef enum {
     AGUARDANDO_CONEXAO,
@@ -25,7 +26,6 @@ typedef enum {
     JOGO_TERMINADO
 } GameState;
 
-// Estrutura de controle do jogo
 typedef struct {
     Player player[MAX_JOGADORES];
     int socket_jogador[MAX_JOGADORES];
@@ -34,8 +34,8 @@ typedef struct {
     int navios_restantes[MAX_JOGADORES];
     GameState estado;
     pthread_mutex_t lock;
-    pthread_cond_t turno_cond;
     int fim_do_jogo;
+    int jogadores_conectados;
 } GameController;
 
 GameController controller;
@@ -104,6 +104,13 @@ int posicionar_navios(int sock, int indice_jogador) {
         }
 
         buffer[bytes] = '\0';
+
+        // Log truncado para caber no buffer
+        char log_msg[LOG_MSG_SIZE];
+        int max_data = LOG_MSG_SIZE - 50; // Reserva espaço para o texto fixo
+        snprintf(log_msg, sizeof(log_msg), "RECEBIDO [%.*s] de %s", 
+                 max_data, buffer, controller.player[indice_jogador].nome);
+        registrar_log(log_msg);
 
         char tipo[16] = {0}, direcao;
         int x, y;
@@ -211,6 +218,7 @@ void processar_ataque(int player_index, int x, int y) {
         snprintf(log_msg, sizeof(log_msg),
                  "ATAQUE_INVALIDO: %s atacou (%d,%d)",
                  controller.player[player_index].nome, x, y);
+        printf("%s\n", log_msg);
         registrar_log(log_msg);
         snprintf(resultado, sizeof(resultado), "ERRO: Coordenadas inválidas");
         enviar_comando(controller.socket_jogador[player_index], resultado);
@@ -262,6 +270,13 @@ void aguardar_ready(int sock) {
     
     buffer[bytes] = '\0';
     
+    // Log truncado para caber no buffer
+    char log_msg[LOG_MSG_SIZE];
+    int max_data = LOG_MSG_SIZE - 40; // Reserva espaço para o texto fixo
+    snprintf(log_msg, sizeof(log_msg), "RECEBIDO [%.*s] durante AGUARDAR_READY", 
+             max_data, buffer);
+    registrar_log(log_msg);
+    
     if (strcmp(buffer, "READY") == 0) {
         pthread_mutex_lock(&controller.lock);
         controller.jogadores_prontos++;
@@ -276,9 +291,18 @@ void aguardar_ready(int sock) {
 void receber_join(int sock) {
     char buffer[MAX_MSG];
     ssize_t bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-    if (bytes <= 0) return;
+    if (bytes <= 0) {
+        return;
+    }
     
     buffer[bytes] = '\0';
+    
+    // Log truncado para caber no buffer
+    char log_msg[LOG_MSG_SIZE];
+    int max_data = LOG_MSG_SIZE - 20; // Reserva espaço para o texto fixo
+    snprintf(log_msg, sizeof(log_msg), "RECEBIDO [%.*s] em JOIN", 
+             max_data, buffer);
+    registrar_log(log_msg);
     
     if (strncmp(buffer, "JOIN", 4) == 0) {
         pthread_mutex_lock(&controller.lock);
@@ -289,17 +313,29 @@ void receber_join(int sock) {
                 break;
             }
         }
+        
         if (indice != -1) {
             controller.socket_jogador[indice] = sock;
             sscanf(buffer + 5, "%49s", controller.player[indice].nome);
-            printf("Jogador conectado: %s\n", controller.player[indice].nome);
+            controller.jogadores_conectados++;
+            printf("Jogador conectado: %s (socket %d, total: %d)\n", 
+                   controller.player[indice].nome, sock, controller.jogadores_conectados);
             
-            // CORREÇÃO: Envia mensagem de espera para o primeiro jogador
+            // Envia mensagem apropriada
             if (indice == 0) {
                 enviar_comando(sock, "AGUARDE JOGADOR");
-            }
-            
-            if (indice == 1) {
+            } else {
+                enviar_comando(sock, "JOGO INICIADO");
+                enviar_comando(controller.socket_jogador[0], "JOGO INICIADO");
+                
+                // Envia identificação de jogador para ambos
+                char msg[50];
+                snprintf(msg, sizeof(msg), "VOCE_E_JOGADOR 1");
+                enviar_comando(controller.socket_jogador[0], msg);
+                
+                snprintf(msg, sizeof(msg), "VOCE_E_JOGADOR 2");
+                enviar_comando(sock, msg);
+                
                 controller.estado = POSICIONANDO_NAVIOS;
             }
         }
@@ -309,14 +345,6 @@ void receber_join(int sock) {
 
 void* game_thread(void* arg) {
     printf("Iniciando controle do jogo...\n");
-    
-    // Notificar início do jogo
-    broadcast("JOGO INICIADO");
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        char msg[50];
-        snprintf(msg, sizeof(msg), "VOCE_E_JOGADOR %d", i + 1);
-        enviar_comando(controller.socket_jogador[i], msg);
-    }
     
     // Fase de posicionamento
     for (int i = 0; i < MAX_JOGADORES; i++) {
@@ -360,18 +388,25 @@ void* game_thread(void* arg) {
         
         buffer[bytes] = '\0';
         
+        // Log truncado para caber no buffer
+        char log_msg[LOG_MSG_SIZE];
+        int max_data = LOG_MSG_SIZE - 30; // Reserva espaço para o texto fixo
+        snprintf(log_msg, sizeof(log_msg), "RECEBIDO [%.*s] de %s", 
+                 max_data, buffer, controller.player[current_player].nome);
+        registrar_log(log_msg);
+        
         if (strncmp(buffer, CMD_FIRE, 4) == 0) {
             int x, y;
             if (sscanf(buffer + 5, "%d %d", &x, &y) == 2) {
                 pthread_mutex_lock(&controller.lock);
+                
                 // Processa ataque
                 processar_ataque(current_player, x, y);
                 
                 // Verifica vitória
-                int alvo = (current_player + 1) % MAX_JOGADORES;
-                if (controller.navios_restantes[alvo] == 0) {
+                if (controller.navios_restantes[(current_player + 1) % MAX_JOGADORES] == 0) {
                     enviar_comando(controller.socket_jogador[current_player], "WIN");
-                    enviar_comando(controller.socket_jogador[alvo], "LOSE");
+                    enviar_comando(controller.socket_jogador[(current_player + 1) % MAX_JOGADORES], "LOSE");
                     broadcast("FIM");
                     controller.fim_do_jogo = 1;
                     pthread_mutex_unlock(&controller.lock);
@@ -382,7 +417,7 @@ void* game_thread(void* arg) {
                 controller.jogador_da_vez = (controller.jogador_da_vez + 1) % MAX_JOGADORES;
                 pthread_mutex_unlock(&controller.lock);
                 
-                // Notifica os jogadores sobre a mudança de turno
+                // Notifica os jogadores
                 enviar_comando(controller.socket_jogador[controller.jogador_da_vez], "PLAY");
                 enviar_comando(controller.socket_jogador[(controller.jogador_da_vez + 1) % MAX_JOGADORES], "AGUARDE");
             }
@@ -400,16 +435,8 @@ void* lidar_com_jogador(void* arg) {
     
     // Se ambos jogadores conectados, iniciar thread de jogo
     pthread_mutex_lock(&controller.lock);
-    int ambos_conectados = 1;
-    for (int i = 0; i < MAX_JOGADORES; i++) {
-        if (controller.socket_jogador[i] == 0) {
-            ambos_conectados = 0;
-            break;
-        }
-    }
-    
-    if (ambos_conectados && controller.estado == AGUARDANDO_CONEXAO) {
-        controller.estado = POSICIONANDO_NAVIOS;
+    if (controller.jogadores_conectados == MAX_JOGADORES && 
+        controller.estado == POSICIONANDO_NAVIOS) {
         pthread_t game_tid;
         if (pthread_create(&game_tid, NULL, game_thread, NULL) != 0) {
             perror("Falha ao criar thread de jogo");
@@ -433,8 +460,8 @@ int main() {
     controller.estado = AGUARDANDO_CONEXAO;
     controller.fim_do_jogo = 0;
     controller.jogador_da_vez = 0;
+    controller.jogadores_conectados = 0;
     pthread_mutex_init(&controller.lock, NULL);
-    pthread_cond_init(&controller.turno_cond, NULL);
     
     for (int i = 0; i < MAX_JOGADORES; i++) {
         controller.socket_jogador[i] = 0;
@@ -501,6 +528,5 @@ int main() {
     printf("Fim de jogo. Encerrando servidor.\n");
     close(server_fd);
     pthread_mutex_destroy(&controller.lock);
-    pthread_cond_destroy(&controller.turno_cond);
     return 0;
 }
