@@ -147,24 +147,14 @@ int main(int argc, char *argv[]) {
         receber_resposta(sock);
         printf("Servidor: %s\n", resposta_servidor);
         
-        if (strstr(resposta_servidor, CMD_VOCE_E_JOGADOR) != NULL) {
-            break;
-        }
-        
-        if (strcmp(resposta_servidor, "AGUARDE JOGADOR") == 0) {
-            printf("Aguardando outro jogador conectar...\n");
-            continue;
-        }
-        
-        if (strcmp(resposta_servidor, "JOGO INICIADO") == 0) {
-            printf("Jogo iniciado! Preparando para posicionar navios...\n");
-            continue;
-        }
+        if (strstr(resposta_servidor, "VOCE_E_JOGADOR") != NULL) break;
+        if (strstr(resposta_servidor, "INICIO_POSICIONAMENTO") != NULL) break;
     }
 
-    // Fase de posicionamento
+    // Fase de posicionamento simultâneo
     printf("\n=== FASE DE POSICIONAMENTO ===\n");
-    printf("Navios: 2x FRAGATA (tam=2), 1x SUBMARINO (tam=1), 1x DESTROYER (tam=3)\n");
+    printf("Posicione seus navios (você e seu oponente podem posicionar simultaneamente):\n");
+    printf("Navios disponíveis: 2x FRAGATA (tam=2), 1x SUBMARINO (tam=1), 1x DESTROYER (tam=3)\n");
     printf("Use: POS TIPO X Y DIRECAO (H/V)\nEx: POS FRAGATA 3 4 H\n\n");
     
     int fragatas = 0, submarinos = 0, destroyers = 0;
@@ -172,6 +162,11 @@ int main(int argc, char *argv[]) {
     
     while (!(fragatas == 2 && submarinos == 1 && destroyers == 1)) {
         exibir_tabuleiros();
+        printf("\nNavios restantes:\n");
+        printf("- Fragatas: %d/2\n", 2 - fragatas);
+        printf("- Submarinos: %d/1\n", 1 - submarinos);
+        printf("- Destroyers: %d/1\n", 1 - destroyers);
+        
         ler_comando_cmd(CMD_POS);
         
         char tipo[16] = {0}, direcao;
@@ -255,7 +250,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Fase de preparação
-    printf("\nDigite 'READY' quando estiver pronto\n");
+    printf("\nTodos os navios posicionados! Digite 'READY' quando estiver pronto\n");
     ler_comando_cmd(CMD_READY);
     enviar_comando(sock);
     receber_resposta(sock);
@@ -284,13 +279,11 @@ int main(int argc, char *argv[]) {
             
             enviar_comando(sock);
         }
-        // Atualiza campo próprio quando atacado
         else if (strstr(resposta_servidor, CMD_ATACANTE) != NULL) {
             int x, y;
             char resultado[10];
             sscanf(resposta_servidor + 9, "%d %d %s", &x, &y, resultado);
             
-            // CORREÇÃO: Atualiza o campo próprio (meu_campo)
             if (strcmp(resultado, "MISS") == 0) {
                 meu_campo[x][y] = 'M';
             } else if (strcmp(resultado, "HIT") == 0) {
@@ -302,7 +295,6 @@ int main(int argc, char *argv[]) {
             exibir_tabuleiros();
             printf("Adversário atacou: %s\n", resposta_servidor);
         }
-        // Atualiza campo adversário quando ataca
         else if (strcmp(resposta_servidor, "MISS") == 0) {
             printf("Água! Nenhum navio atingido.\n");
             int x, y;
@@ -338,6 +330,12 @@ int main(int argc, char *argv[]) {
         }
         else if (strcmp(resposta_servidor, "AGUARDE") == 0) {
             printf("Aguarde seu turno...\n");
+        }
+        else if (strcmp(resposta_servidor, "AGUARDANDO_READY") == 0) {
+            printf("Aguardando outro jogador ficar pronto...\n");
+        }
+        else if (strcmp(resposta_servidor, "INICIO_POSICIONAMENTO") == 0) {
+            // Já tratado, pode ignorar
         }
         else {
             printf("Servidor: %s\n", resposta_servidor);
