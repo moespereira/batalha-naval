@@ -187,7 +187,7 @@ int posicionar_navios(int sock, int indice_jogador) {
         enviar_comando(sock, resposta);
     }
 
-    controller.navios_restantes[indice_jogador] = 4; // 4 navios no total
+    controller.navios_restantes[indice_jogador] = 4;
     enviar_comando(sock, "OK: Todos os navios posicionados!\n");
     imprimir_campo(indice_jogador);
     return 0;
@@ -293,6 +293,11 @@ void receber_join(int sock) {
             controller.socket_jogador[indice] = sock;
             sscanf(buffer + 5, "%49s", controller.player[indice].nome);
             printf("Jogador conectado: %s\n", controller.player[indice].nome);
+            
+            // CORREÇÃO: Envia mensagem de espera para o primeiro jogador
+            if (indice == 0) {
+                enviar_comando(sock, "AGUARDE JOGADOR");
+            }
             
             if (indice == 1) {
                 controller.estado = POSICIONANDO_NAVIOS;
