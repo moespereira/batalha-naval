@@ -146,10 +146,20 @@ int main(int argc, char *argv[]) {
     // Receber confirmação de conexão
     while (1) {
         receber_resposta(sock);
-        printf("%s\n", resposta_servidor);
+        printf("Servidor: %s\n", resposta_servidor);
         
         if (strstr(resposta_servidor, CMD_VOCE_E_JOGADOR) != NULL) {
             break;
+        }
+        
+        if (strcmp(resposta_servidor, "AGUARDE JOGADOR") == 0) {
+            printf("Aguardando outro jogador conectar...\n");
+            continue;
+        }
+        
+        if (strcmp(resposta_servidor, "JOGO INICIADO") == 0) {
+            printf("Jogo iniciado! Preparando para posicionar navios...\n");
+            continue;
         }
     }
 
